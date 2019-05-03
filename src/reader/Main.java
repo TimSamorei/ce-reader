@@ -22,11 +22,19 @@ public class Main {
 	private static final byte[] CLA_INS_P1_P2 = { 0x00, (byte)0xA4, 0x04, 0x00 };
 	private static final short SW_SUCCESS = (short) 0x9000;
     private final static byte PKI_APPLET_CLA = (byte) 0x80;
-    private final static byte INS_VERIFY = (byte) 0xA0;
-    private final static byte INS_GETCERT = (byte) 0xA1;
-    private final static byte INS_GETCERT2 = (byte) 0xA2;
+    private final static byte INS_GETSIGNATURE = (byte) 0xA0;
+    private final static byte INS_GETCERT = (byte) 0xB0;
+    private final static byte INS_GETDATA = (byte) 0xC0;
+    
+    static byte[] responseData;
+    static int responseLength;
+    static String request;
 	
+    static CardChannel channel;
+    
 	public static void main(String[] args) {
+		String alias = args[0];
+		
 		try {
 			TerminalFactory factory = TerminalFactory.getDefault();
 			CardTerminals terminals = factory.terminals();
@@ -40,44 +48,44 @@ public class Main {
 			card.beginExclusive();
         
 			try {
-				CardChannel channel = card.getBasicChannel();
+				// Select Applet
+				channel = card.getBasicChannel();
 				CommandAPDU cmd = new CommandAPDU(createSelectAidApdu(AID_ANDROID));
 				ResponseAPDU response = transmit(channel, cmd);
 				checkSW(response);
 				
+				// Generate random String to get signed
 				String randomString = "Hello World!";
-				System.out.println("String to Verify: " + randomString);
-				System.out.println("Bytes to Verify: " + Arrays.toString(randomString.getBytes("ASCII")));
 				
-				cmd = new CommandAPDU(PKI_APPLET_CLA, INS_VERIFY, 0x00, 0x00, randomString.getBytes("ASCII"));
+				// Send Signature Request
+				request = randomString + "#" + alias;
+				cmd = new CommandAPDU(PKI_APPLET_CLA, INS_GETSIGNATURE, 0x00, 0x00, request.getBytes("ASCII"));
 				response = transmit(channel, cmd);
 				checkSW(response);
-				byte[] signature = response.getData();
-				System.out.printf("Got signature from card(HEX): %s\n", toHex(signature));
-				System.out.printf("Got signature from card(String): %s\n", new String(signature));
+				responseData = response.getData();
 				
-				String alias = "alias 1";
-				System.out.println("Alias (String): " + alias);
-				System.out.println("Alias (Bytes): " + Arrays.toString(alias.getBytes("ASCII")));
-				cmd = new CommandAPDU(PKI_APPLET_CLA, INS_GETCERT, 0x00, 0x00, alias.getBytes("ASCII"));
+				// Get Signature
+				responseLength = new Integer(new String(responseData));
+				byte[] signature = new byte[responseLength];
+				getData(signature, "signature", responseLength);
+				
+				// Send Certificate Request
+				request = alias;
+				cmd = new CommandAPDU(PKI_APPLET_CLA, INS_GETCERT, 0x00, 0x00, request.getBytes("ASCII"));
 				response = transmit(channel, cmd);
 				checkSW(response);
-				byte[] certBlob1 = response.getData();
+				responseData = response.getData();
 				
-				cmd = new CommandAPDU(PKI_APPLET_CLA, INS_GETCERT2, 0x00, 0x00, alias.getBytes("ASCII"));
-				response = transmit(channel, cmd);
-				checkSW(response);
-				byte[] certBlob2 = response.getData();
+				// Get Certificate
+				responseLength = new Integer(new String(responseData));
+				byte[] certificate = new byte[responseLength];
+				getData(certificate, "certificate", responseLength);
 				
-				byte[] certBlob = Arrays.copyOf(certBlob1, certBlob1.length + certBlob2.length);
-				System.arraycopy(certBlob2, 0, certBlob, certBlob1.length, certBlob2.length);
-				
-				System.out.printf("Got cert from card(HEX): %s\n", toHex(certBlob));
-				System.out.printf("Got cert from card(String): %s\n", new String(certBlob));
-				
+				// Create Certificate Instance
 				CertificateFactory cf = CertificateFactory.getInstance("X509");
-                X509Certificate cert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(certBlob));
+                X509Certificate cert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(certificate));
                 
+                // Check Signature
                 Signature s = Signature.getInstance("SHA1withRSA");
                 s.initVerify(cert);
                 s.update(randomString.getBytes("ASCII"));
@@ -93,6 +101,34 @@ public class Main {
         }
 	}
 	
+	private static void getData(byte[] destination, String dataType, int dataLength) {
+		try {
+		int counter = 0;
+		CommandAPDU cmd;
+		ResponseAPDU response;
+		byte[] data;
+		String request;
+		while (responseLength > 200) {
+			request = dataType + "#" + "200" + "#" + counter;
+			cmd = new CommandAPDU(PKI_APPLET_CLA, INS_GETDATA, 0x00, 0x00, request.getBytes("ASCII"));
+			response = transmit(channel, cmd);
+			checkSW(response);
+			data = response.getData();
+			System.arraycopy(data, 0, destination, counter*200, 200);
+			responseLength = responseLength - 200;
+			counter++;
+		}
+		request = dataType + "#" + responseLength + "#" + counter;
+		cmd = new CommandAPDU(PKI_APPLET_CLA, INS_GETDATA, 0x00, 0x00, request.getBytes("ASCII"));
+		response = transmit(channel, cmd);
+		checkSW(response);
+		data = response.getData();
+		System.arraycopy(data, 0, destination, counter*200, responseLength);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+
 	private static Card waitForCard(CardTerminals terminals)
             throws CardException {
         while (true) {
@@ -132,7 +168,7 @@ public class Main {
 		return result;
 	}
     
-    public static String toHex(byte[] bytes) {
+    private static String toHex(byte[] bytes) {
         StringBuilder buff = new StringBuilder();
         for (byte b : bytes) {
             buff.append(String.format("%02X", b));
